@@ -3,6 +3,7 @@ set -eu
 
 METADATA_DIR="${GARAGE_METADATA_DIR:-/var/lib/garage/meta}"
 DATA_DIR="${GARAGE_DATA_DIR:-/var/lib/garage/data}"
+CREDENTIALS_FILE="${GARAGE_CREDENTIALS_FILE:-$DATA_DIR/credentials.env}"
 RPC_SECRET="${GARAGE_RPC_SECRET:?GARAGE_RPC_SECRET is required}"
 GARAGE_DOMAIN="${GARAGE_DOMAIN:-${RAILWAY_PUBLIC_DOMAIN:-garage-s3-dev.up.railway.app}}"
 
@@ -11,16 +12,33 @@ rand_hex() {
   head -c "$bytes" /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
-export GARAGE_DEFAULT_ACCESS_KEY="${GARAGE_DEFAULT_ACCESS_KEY:-GK$(rand_hex 16)}"
-export GARAGE_DEFAULT_SECRET_KEY="${GARAGE_DEFAULT_SECRET_KEY:-$(rand_hex 32)}"
-export GARAGE_DEFAULT_BUCKET="${GARAGE_DEFAULT_BUCKET:-garage-bucket}"
-
 mkdir -p "$METADATA_DIR" "$DATA_DIR" /etc
 
-#region agent log
-printf '{"sessionId":"271075","runId":"cluster-fix","hypothesisId":"H8","location":"start.sh:config","message":"Generating garage.toml","data":{"metadataDir":"%s","dataDir":"%s","garageDomain":"%s","singleNode":true},"timestamp":%s}\n' \
-  "$METADATA_DIR" "$DATA_DIR" "$GARAGE_DOMAIN" "$(date +%s000)" >> /tmp/debug-271075.log 2>/dev/null || true
-#endregion
+CLUSTER_EXISTS=false
+if [ -f "$METADATA_DIR/db.sqlite" ]; then
+  CLUSTER_EXISTS=true
+fi
+
+if [ -n "${GARAGE_DEFAULT_ACCESS_KEY:-}" ] && [ -n "${GARAGE_DEFAULT_SECRET_KEY:-}" ]; then
+  export GARAGE_DEFAULT_BUCKET="${GARAGE_DEFAULT_BUCKET:-garage-bucket}"
+elif [ -f "$CREDENTIALS_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$CREDENTIALS_FILE"
+elif [ "$CLUSTER_EXISTS" = false ]; then
+  export GARAGE_DEFAULT_ACCESS_KEY="GK$(rand_hex 16)"
+  export GARAGE_DEFAULT_SECRET_KEY="$(rand_hex 32)"
+  export GARAGE_DEFAULT_BUCKET="${GARAGE_DEFAULT_BUCKET:-garage-bucket}"
+  umask 077
+  cat > "$CREDENTIALS_FILE" <<EOF
+GARAGE_DEFAULT_ACCESS_KEY=$GARAGE_DEFAULT_ACCESS_KEY
+GARAGE_DEFAULT_SECRET_KEY=$GARAGE_DEFAULT_SECRET_KEY
+GARAGE_DEFAULT_BUCKET=$GARAGE_DEFAULT_BUCKET
+EOF
+else
+  echo "WARNING: Cluster already exists but credentials were not found."
+  echo "Set GARAGE_DEFAULT_ACCESS_KEY and GARAGE_DEFAULT_SECRET_KEY in Railway,"
+  echo "or create a new key with: garage key create my-key"
+fi
 
 cat <<EOF > /etc/garage.toml
 metadata_dir = "$METADATA_DIR"
@@ -42,15 +60,16 @@ root_domain = ".$GARAGE_DOMAIN"
 index = "index.html"
 EOF
 
-echo "Garage S3 credentials (save these):"
-echo "  GARAGE_DEFAULT_ACCESS_KEY=$GARAGE_DEFAULT_ACCESS_KEY"
-echo "  GARAGE_DEFAULT_SECRET_KEY=$GARAGE_DEFAULT_SECRET_KEY"
-echo "  GARAGE_DEFAULT_BUCKET=$GARAGE_DEFAULT_BUCKET"
-echo "  AWS_ENDPOINT_URL=https://$GARAGE_DOMAIN"
+if [ -n "${GARAGE_DEFAULT_ACCESS_KEY:-}" ] && [ -n "${GARAGE_DEFAULT_SECRET_KEY:-}" ]; then
+  echo "Garage S3 credentials:"
+  echo "  GARAGE_DEFAULT_ACCESS_KEY=$GARAGE_DEFAULT_ACCESS_KEY"
+  echo "  GARAGE_DEFAULT_SECRET_KEY=$GARAGE_DEFAULT_SECRET_KEY"
+  echo "  GARAGE_DEFAULT_BUCKET=${GARAGE_DEFAULT_BUCKET:-garage-bucket}"
+  echo "  AWS_ENDPOINT_URL=https://$GARAGE_DOMAIN"
+fi
 
-#region agent log
-printf '{"sessionId":"271075","runId":"cluster-fix","hypothesisId":"H9","location":"start.sh:launch","message":"Starting garage server with single-node","data":{"bucket":"%s"},"timestamp":%s}\n' \
-  "$GARAGE_DEFAULT_BUCKET" "$(date +%s000)" >> /tmp/debug-271075.log 2>/dev/null || true
-#endregion
-
-exec /garage server --single-node --default-bucket
+if [ "$CLUSTER_EXISTS" = false ]; then
+  exec /garage server --single-node --default-bucket
+else
+  exec /garage server
+fi
