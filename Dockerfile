@@ -1,4 +1,4 @@
-FROM dxflrs/garage:v2.0.0 AS garage
+FROM dxflrs/garage:v2.3.0 AS garage
 
 FROM alpine:3.19
 
